@@ -8,23 +8,30 @@ file automatically if it does not yet exist.
 
 import json
 import os
-from typing import Any, Dict, List
+import tempfile
+from datetime import date
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-TASKS_FILE = "tasks.json"
+TASKS_FILE = str(Path(__file__).resolve().with_name("tasks.json"))
 
 
 class StorageError(Exception):
     """Raised when tasks cannot be loaded from, or saved to, disk."""
 
 
-def load_tasks(file_path: str = TASKS_FILE) -> List[Dict[str, Any]]:
+def load_task_data(
+    file_path: str = TASKS_FILE,
+) -> Tuple[List[Dict[str, Any]], int]:
     """
     Load the task list from the given JSON file.
 
     Behavior:
-        - If the file does not exist, it is created with an empty list
-          and an empty list is returned.
+        - If the file does not exist, it is created with an empty task
+          collection and an empty collection is returned.
         - If the file exists but is empty, an empty list is returned.
+        - Both the original JSON list and the current object format are
+          supported. The object format stores the next ID as well as tasks.
         - If the file contains invalid JSON or the wrong data shape,
           a StorageError is raised so the caller can decide how to
           recover (the file itself is left untouched).
@@ -33,23 +40,22 @@ def load_tasks(file_path: str = TASKS_FILE) -> List[Dict[str, Any]]:
         file_path: Path to the JSON tasks file.
 
     Returns:
-        A list of task dictionaries.
+        The task dictionaries and the next unused task ID.
 
     Raises:
         StorageError: If the file cannot be read or contains invalid data.
     """
-    if not os.path.exists(file_path):
-        save_tasks([], file_path)
-        return []
-
     try:
         with open(file_path, "r", encoding="utf-8") as file:
             raw_content = file.read().strip()
-    except OSError as error:
+    except FileNotFoundError:
+        save_tasks([], file_path, next_id=1)
+        return [], 1
+    except (OSError, UnicodeError) as error:
         raise StorageError(f"Could not read '{file_path}': {error}") from error
 
     if not raw_content:
-        return []
+        return [], 1
 
     try:
         data = json.loads(raw_content)
@@ -60,15 +66,61 @@ def load_tasks(file_path: str = TASKS_FILE) -> List[Dict[str, Any]]:
             "The file was left unchanged."
         ) from error
 
-    if not isinstance(data, list):
-        raise StorageError(
-            f"'{file_path}' does not contain a list of tasks as expected."
-        )
+    if isinstance(data, list):
+        tasks = data
+        next_id = 1
+    elif isinstance(data, dict) and isinstance(data.get("tasks"), list):
+        tasks = data["tasks"]
+        next_id = data.get("next_id")
+        if type(next_id) is not int or next_id < 1:
+            raise StorageError(f"'{file_path}' contains an invalid next_id.")
+    else:
+        raise StorageError(f"'{file_path}' does not contain a valid task list.")
 
-    return data
+    ids = []
+    for task in tasks:
+        if not isinstance(task, dict) or type(task.get("id")) is not int or task["id"] < 1:
+            raise StorageError(f"'{file_path}' contains a task with an invalid ID.")
+        if not isinstance(task.get("title"), str) or not task["title"].strip():
+            raise StorageError(f"'{file_path}' contains a task with an invalid title.")
+        if "description" in task and not isinstance(task["description"], str):
+            raise StorageError(f"'{file_path}' contains an invalid description.")
+        if "completed" in task and type(task["completed"]) is not bool:
+            raise StorageError(f"'{file_path}' contains an invalid completion status.")
+        if "priority" in task and task["priority"] not in ("Low", "Medium", "High"):
+            raise StorageError(f"'{file_path}' contains an invalid priority.")
+        due_date = task.get("due_date")
+        if due_date is not None:
+            if not isinstance(due_date, str):
+                raise StorageError(f"'{file_path}' contains an invalid due date.")
+            try:
+                parsed_date = date.fromisoformat(due_date)
+            except ValueError as error:
+                raise StorageError(f"'{file_path}' contains an invalid due date.") from error
+            if parsed_date.isoformat() != due_date:
+                raise StorageError(f"'{file_path}' contains an invalid due date.")
+        ids.append(task["id"])
+    if len(ids) != len(set(ids)):
+        raise StorageError(f"'{file_path}' contains duplicate task IDs.")
+
+    if isinstance(data, list):
+        next_id = max(ids, default=0) + 1
+    elif next_id <= max(ids, default=0):
+        raise StorageError(f"'{file_path}' contains a next_id that is not unique.")
+    return tasks, next_id
 
 
-def save_tasks(tasks: List[Dict[str, Any]], file_path: str = TASKS_FILE) -> None:
+def load_tasks(file_path: str = TASKS_FILE) -> List[Dict[str, Any]]:
+    """Load task records, preserving the original list-returning API."""
+    tasks, _ = load_task_data(file_path)
+    return tasks
+
+
+def save_tasks(
+    tasks: List[Dict[str, Any]],
+    file_path: str = TASKS_FILE,
+    next_id: Optional[int] = None,
+) -> None:
     """
     Save the given list of tasks to the JSON file, overwriting its contents.
 
@@ -80,7 +132,28 @@ def save_tasks(tasks: List[Dict[str, Any]], file_path: str = TASKS_FILE) -> None
         StorageError: If the file cannot be written to disk.
     """
     try:
-        with open(file_path, "w", encoding="utf-8") as file:
-            json.dump(tasks, file, indent=4)
-    except OSError as error:
+        if next_id is None:
+            next_id = max((task["id"] for task in tasks), default=0) + 1
+        if type(next_id) is not int or next_id <= max(
+            (task["id"] for task in tasks), default=0
+        ):
+            raise ValueError("next_id must be greater than every task ID")
+        payload = {"next_id": next_id, "tasks": tasks}
+        destination = Path(file_path)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=str(destination.parent),
+                delete=False,
+            ) as file:
+                temp_path = file.name
+                json.dump(payload, file, indent=4)
+                file.write("\n")
+            os.replace(temp_path, destination)
+        finally:
+            if temp_path is not None and os.path.exists(temp_path):
+                os.unlink(temp_path)
+    except (OSError, TypeError, ValueError, KeyError) as error:
         raise StorageError(f"Could not write to '{file_path}': {error}") from error

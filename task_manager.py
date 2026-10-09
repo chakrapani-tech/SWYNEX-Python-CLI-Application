@@ -19,7 +19,11 @@ DEFAULT_PRIORITY = "Medium"
 class TaskManager:
     """Manages an in-memory collection of tasks."""
 
-    def __init__(self, tasks: Optional[List[Dict[str, Any]]] = None) -> None:
+    def __init__(
+        self,
+        tasks: Optional[List[Dict[str, Any]]] = None,
+        next_id: Optional[int] = None,
+    ) -> None:
         """
         Initialize the manager with an existing list of tasks (e.g. loaded
         from disk), or start empty if none is provided.
@@ -33,6 +37,8 @@ class TaskManager:
         self.tasks: List[Dict[str, Any]] = [
             self._normalize_task(task) for task in raw_tasks
         ]
+        highest_id = max((task["id"] for task in self.tasks), default=0)
+        self._next_id = max(next_id or 1, highest_id + 1)
 
     @staticmethod
     def _normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -53,10 +59,15 @@ class TaskManager:
         return normalized
 
     def _generate_task_id(self) -> int:
-        """Generate a unique task ID, one greater than the current max."""
-        if not self.tasks:
-            return 1
-        return max(task["id"] for task in self.tasks) + 1
+        """Generate a monotonically increasing task ID."""
+        task_id = self._next_id
+        self._next_id += 1
+        return task_id
+
+    @property
+    def next_id(self) -> int:
+        """Return the next ID for persistence."""
+        return self._next_id
 
     def add_task(
         self,
@@ -164,4 +175,17 @@ class TaskManager:
             for task in self.tasks
             if normalized_query in task.get("title", "").lower()
             or normalized_query in task.get("description", "").lower()
+        ]
+
+    def filter_tasks(
+        self,
+        priority: Optional[str] = None,
+        completed: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """Filter tasks by optional canonical priority and completion state."""
+        return [
+            task
+            for task in self.tasks
+            if (priority is None or task.get("priority") == priority)
+            and (completed is None or task.get("completed") is completed)
         ]

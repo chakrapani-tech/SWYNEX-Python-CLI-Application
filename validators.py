@@ -117,6 +117,8 @@ def parse_due_date(raw_date: str) -> Optional[str]:
     except ValueError:
         return None
 
+    if parsed_date.isoformat() != raw_date:
+        return None
     return parsed_date.isoformat()
 
 

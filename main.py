@@ -33,11 +33,12 @@ MENU_TEXT = """
 3. Complete Task
 4. Delete Task
 5. Search Tasks
-6. Exit
+6. Filter Tasks
+7. Exit
 ========================================
 """
 
-VALID_CHOICES = {"1", "2", "3", "4", "5", "6"}
+VALID_CHOICES = {"1", "2", "3", "4", "5", "6", "7"}
 
 
 def display_menu() -> None:
@@ -93,13 +94,14 @@ def print_task_summary(tasks: List[Dict[str, Any]]) -> None:
     print(f"Completed: {completed}")
 
 
-def persist(manager: TaskManager) -> None:
-    """Save the manager's current tasks to disk, reporting failures clearly."""
+def persist(manager: TaskManager) -> bool:
+    """Save tasks and report whether the update reached persistent storage."""
     try:
-        storage.save_tasks(manager.get_all_tasks())
+        storage.save_tasks(manager.get_all_tasks(), next_id=manager.next_id)
     except StorageError as error:
-        print(f"Warning: Your change was kept in memory, but saving to disk "
-              f"failed. {error}")
+        print(f"Error: The change is only in memory; saving to disk failed. {error}")
+        return False
+    return True
 
 
 def handle_add_task(manager: TaskManager) -> None:
@@ -130,8 +132,10 @@ def handle_add_task(manager: TaskManager) -> None:
             )
 
     task = manager.add_task(title, description, priority, due_date)
-    persist(manager)
-    print(f"Task added successfully with ID: {task['id']}")
+    if persist(manager):
+        print(f"Task added successfully with ID: {task['id']}")
+    else:
+        print(f"Task added in memory with ID: {task['id']}, but was not saved.")
 
 
 def handle_view_tasks(manager: TaskManager) -> None:
@@ -166,6 +170,34 @@ def handle_search_tasks(manager: TaskManager) -> None:
         print_task(task)
 
 
+def handle_filter_tasks(manager: TaskManager) -> None:
+    """Filter tasks by optional priority and completion status."""
+    raw_priority = input("Priority (Low/Medium/High, or blank for any): ")
+    priority = None
+    if raw_priority.strip():
+        priority = validate_priority(raw_priority)
+        if priority is None:
+            print("Error: Priority must be Low, Medium, or High.")
+            return
+
+    raw_status = input("Status (pending/completed, or blank for any): ")
+    status = raw_status.strip().lower()
+    if status not in ("", "pending", "completed"):
+        print("Error: Status must be pending or completed.")
+        return
+
+    completed = None if not status else status == "completed"
+    matches = manager.filter_tasks(priority=priority, completed=completed)
+    if not matches:
+        print("No tasks match the selected filters.")
+        return
+
+    print(f"Found {len(matches)} matching task(s):")
+    print("-" * 40)
+    for task in matches:
+        print_task(task)
+
+
 def handle_complete_task(manager: TaskManager) -> None:
     """Prompt for a task ID and mark that task as completed."""
     raw_id = input("Enter task ID to mark as completed: ")
@@ -175,8 +207,10 @@ def handle_complete_task(manager: TaskManager) -> None:
         return
 
     if manager.complete_task(task_id):
-        persist(manager)
-        print("Task marked as completed successfully.")
+        if persist(manager):
+            print("Task marked as completed successfully.")
+        else:
+            print("Task marked completed in memory, but was not saved.")
     else:
         print("Task not found.")
 
@@ -204,33 +238,33 @@ def handle_delete_task(manager: TaskManager) -> None:
         return
 
     manager.delete_task(task_id)
-    persist(manager)
-    print("Task deleted successfully.")
+    if persist(manager):
+        print("Task deleted successfully.")
+    else:
+        print("Task deleted in memory, but the deletion was not saved.")
 
 
 def load_initial_tasks() -> TaskManager:
     """
     Load tasks from disk at startup.
 
-    If the tasks file is missing, storage.load_tasks creates it. If the
-    file exists but is corrupted, the error is reported and the app
-    starts with an empty (in-memory) task list rather than crashing;
-    the corrupted file on disk is left untouched unless the user goes
-    on to save new changes.
+    If the tasks file is missing, storage.load_task_data creates it. A
+    storage error is propagated so the caller can stop rather than allowing
+    a later save to replace an unreadable or malformed file.
     """
-    try:
-        tasks = storage.load_tasks()
-    except StorageError as error:
-        print(f"Warning: {error}")
-        print("Starting with an empty task list for this session.")
-        tasks = []
-    return TaskManager(tasks)
+    tasks, next_id = storage.load_task_data()
+    return TaskManager(tasks, next_id=next_id)
 
 
 def main() -> None:
     """Run the SWYNEX Task Manager CLI loop."""
     print("Welcome to SWYNEX Task Manager!")
-    manager = load_initial_tasks()
+    try:
+        manager = load_initial_tasks()
+    except StorageError as error:
+        print(f"Unable to load saved tasks: {error}")
+        print("No changes were made to the task file. Exiting safely.")
+        return
 
     actions = {
         "1": handle_add_task,
@@ -238,6 +272,7 @@ def main() -> None:
         "3": handle_complete_task,
         "4": handle_delete_task,
         "5": handle_search_tasks,
+        "6": handle_filter_tasks,
     }
 
     while True:
@@ -245,11 +280,11 @@ def main() -> None:
         choice = input("Enter your choice: ")
 
         if not validate_menu_choice(choice, VALID_CHOICES):
-            print("Invalid choice. Please enter a number between 1 and 6.")
+            print("Invalid choice. Please enter a number between 1 and 7.")
             continue
 
         choice = choice.strip()
-        if choice == "6":
+        if choice == "7":
             print("Thank you for using SWYNEX Task Manager. Goodbye!")
             break
 
