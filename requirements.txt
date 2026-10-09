@@ -1,0 +1,7 @@
+# SWYNEX Task Manager - dependencies
+#
+# This project uses only the Python standard library (json, os, datetime,
+# typing). No external/third-party packages are required.
+#
+# There is nothing to install via `pip install -r requirements.txt`;
+# this file is included to document that explicitly.
